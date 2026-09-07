@@ -58,11 +58,11 @@ SessionMonitor reads new message (session_id = "uuid-xxx")
   → Deliver message to user in the correct topic (thread_id)
 ```
 
-**New topic flow**: First message in an unbound topic → directory browser → select directory → session picker (if existing sessions found) or create window → bind topic → forward pending message.
+**New topic flow**: First message in an unbound topic → directory browser → select directory → mark the directory trusted in Claude Code's config (`claude_config.ensure_trusted_directory`, skipped when `CCBOT_AUTO_TRUST_DIRS=false`) → session picker (if existing sessions found) or create window → bind topic → **rename the topic to that first message**. The message is a title, not a prompt: it is never forwarded to Claude, so the session starts empty.
 
 **Resume session flow**: When selecting a directory with existing Claude sessions, a session picker UI is shown. Choosing a session runs `claude --resume <session_id>`. Note: messages continue writing to the original JSONL file, and current Claude Code reports the original session_id in the SessionStart hook (`source: "resume"`), so state stays consistent. As a safety net for hook timeout or older Claude Code versions that report a different session_id, the bot forces both window_state and session_map.json (via `override_session_map_entry`, under the hook's flock) to the resumed session_id.
 
-**Topic lifecycle**: Closing/deleting a topic auto-kills the associated tmux window and unbinds the thread. Stale bindings (window deleted externally) are cleaned up by the status polling loop.
+**Topic lifecycle**: Closing a topic auto-kills the associated tmux window and unbinds the thread. Deleting a topic sends no update to the bot at all — and chats that only allow deletion (e.g. a private forum) never emit FORUM_TOPIC_CLOSED — so `/kill` is the explicit way to kill the window and unbind. Stale bindings (window deleted externally) are cleaned up by the status polling loop.
 
 ## Session Lifecycle
 

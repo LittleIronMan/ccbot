@@ -96,6 +96,13 @@ class Config:
             os.getenv("CCBOT_SHOW_TOOL_CALLS", "true").lower() != "false"
         )
 
+        # Pre-approve the selected directory in Claude Code's config
+        # (projects.<path>.hasTrustDialogAccepted) before starting a session,
+        # so the "Do you trust the files in this folder?" dialog never blocks it
+        self.auto_trust_dirs = (
+            os.getenv("CCBOT_AUTO_TRUST_DIRS", "true").lower() != "false"
+        )
+
         # Show hidden (dot) directories in directory browser
         self.show_hidden_dirs = (
             os.getenv("CCBOT_SHOW_HIDDEN_DIRS", "").lower() == "true"

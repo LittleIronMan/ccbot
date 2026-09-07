@@ -9,7 +9,9 @@ Core responsibilities:
   - Callback query handler: directory browser, history pagination,
     interactive UI navigation, screenshot refresh.
   - Topic-based routing: each named topic binds to one tmux window.
-    Unbound topics trigger the directory browser to create a new session.
+    Unbound topics trigger the directory browser to create a new session;
+    the message that opened the topic becomes the topic title (it is not
+    forwarded to Claude).
   - Photo handling: photos sent by user are downloaded and forwarded
     to Claude Code as file paths (photo_handler).
   - Voice handling: voice messages are transcribed via OpenAI API and
@@ -57,6 +59,7 @@ from telegram.ext import (
     filters,
 )
 
+from .claude_config import ensure_trusted_directory
 from .config import config
 from .handlers.callback_data import (
     CB_ASK_DOWN,
@@ -123,7 +126,6 @@ from .handlers.message_sender import (
     NO_LINK_PREVIEW,
     safe_edit,
     safe_reply,
-    safe_send,
     send_with_fallback,
 )
 from .markdown_v2 import convert_markdown
@@ -172,6 +174,57 @@ def _get_thread_id(update: Update) -> int | None:
     if tid is None or tid == 1:
         return None
     return tid
+
+
+# Telegram's forum topic name limit
+TOPIC_TITLE_MAX_LEN = 128
+
+
+def _topic_title_from_text(text: str) -> str:
+    """Build a topic title from the message that opened the topic.
+
+    Uses the first non-empty line, trimmed to Telegram's length limit.
+    """
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped:
+            return stripped[:TOPIC_TITLE_MAX_LEN]
+    return ""
+
+
+async def _rename_topic(bot: Bot, user_id: int, thread_id: int, title: str) -> bool:
+    """Rename a forum topic; False if Telegram rejects it (e.g. no rights)."""
+    if not title:
+        return False
+    try:
+        await bot.edit_forum_topic(
+            chat_id=session_manager.resolve_chat_id(user_id, thread_id),
+            message_thread_id=thread_id,
+            name=title,
+        )
+        logger.info(
+            "Renamed topic to '%s' (user=%d, thread=%d)", title, user_id, thread_id
+        )
+        return True
+    except Exception as e:
+        logger.warning(
+            "Failed to rename topic (user=%d, thread=%d): %s", user_id, thread_id, e
+        )
+        return False
+
+
+async def _trust_directory(work_dir: str) -> str | None:
+    """Pre-approve `work_dir` in Claude Code's config; returns an error, if any.
+
+    Runs off the event loop — it reads and rewrites ~/.claude.json.
+    """
+    if not config.auto_trust_dirs:
+        return None
+    changed, detail = await asyncio.to_thread(ensure_trusted_directory, work_dir)
+    if changed or detail == "already trusted":
+        logger.info("Trust check for %s: %s", work_dir, detail)
+        return None
+    return detail
 
 
 # --- Command handlers ---
@@ -244,6 +297,65 @@ async def screenshot_command(
         document=io.BytesIO(png_bytes),
         filename="screenshot.png",
         reply_markup=keyboard,
+    )
+
+
+async def kill_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Kill the tmux window bound to this topic and unbind the topic.
+
+    Telegram only emits FORUM_TOPIC_CLOSED (which auto-kills the window) in
+    chats where topics can be closed; where they can only be deleted, deletion
+    produces no update at all, so this is the way to stop a session.
+    """
+    user = update.effective_user
+    if not user or not is_user_allowed(user.id):
+        return
+    if not update.message:
+        return
+
+    thread_id = _get_thread_id(update)
+    if thread_id is None:
+        await safe_reply(update.message, "❌ This command only works in a topic.")
+        return
+
+    wid = session_manager.get_window_for_thread(user.id, thread_id)
+    if not wid:
+        await safe_reply(update.message, "❌ No session bound to this topic.")
+        return
+
+    display = session_manager.get_display_name(wid)
+    w = await tmux_manager.find_window_by_id(wid)
+    killed = await tmux_manager.kill_window(w.window_id) if w else False
+
+    _cancel_bash_capture(user.id, thread_id)
+    session_manager.unbind_thread(user.id, thread_id)
+    await clear_topic_state(user.id, thread_id, context.bot, context.user_data)
+
+    logger.info(
+        "Kill: window %s (id=%s, existed=%s, killed=%s, user=%d, thread=%d)",
+        display,
+        wid,
+        bool(w),
+        killed,
+        user.id,
+        thread_id,
+    )
+
+    if w and not killed:
+        await safe_reply(
+            update.message,
+            f"⚠️ Failed to kill window '{display}', but the topic is unbound.",
+        )
+        return
+
+    detail = (
+        f"Killed window '{display}'."
+        if killed
+        else f"Window '{display}' was already gone."
+    )
+    await safe_reply(
+        update.message,
+        f"✅ {detail}\nTopic unbound — you can delete it now.",
     )
 
 
@@ -912,6 +1024,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 thread_id,
             )
             msg_text, keyboard, win_ids = build_window_picker(unbound)
+            # This first message names the topic once bound; it is not sent to Claude
             if context.user_data is not None:
                 context.user_data[STATE_KEY] = STATE_SELECTING_WINDOW
                 context.user_data[UNBOUND_WINDOWS_KEY] = win_ids
@@ -928,6 +1041,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         )
         start_path = str(Path.cwd())
         msg_text, keyboard, subdirs = build_directory_browser(start_path)
+        # This first message names the topic once bound; it is not sent to Claude
         if context.user_data is not None:
             context.user_data[STATE_KEY] = STATE_BROWSING_DIRECTORY
             context.user_data[BROWSE_PATH_KEY] = start_path
@@ -1025,7 +1139,11 @@ async def _create_and_bind_window(
     pending_thread_id: int | None,
     resume_session_id: str | None = None,
 ) -> None:
-    """Create a tmux window, bind it to a topic, and forward pending text.
+    """Create a tmux window, bind it to a topic, and name the topic.
+
+    The pending text (the message that opened the topic) becomes the topic
+    title instead of being forwarded to Claude — the session starts empty and
+    the user sends the first prompt themselves.
 
     Shared by CB_DIR_CONFIRM (no sessions), CB_SESSION_NEW, and CB_SESSION_SELECT.
     """
@@ -1033,6 +1151,10 @@ async def _create_and_bind_window(
 
     assert isinstance(query, CallbackQuery)
     assert isinstance(user, User)
+
+    # Trust the directory before Claude Code starts, otherwise it opens with a
+    # "Do you trust the files in this folder?" prompt that blocks the session.
+    trust_error = await _trust_directory(selected_path)
 
     success, message, created_wname, created_wid = await tmux_manager.create_window(
         selected_path, resume_session_id=resume_session_id
@@ -1098,44 +1220,28 @@ async def _create_and_bind_window(
                 user.id, pending_thread_id, created_wid, window_name=created_wname
             )
 
-            status = "Resumed" if resume_session_id else "Created"
-            await safe_edit(
-                query,
-                f"✅ {message}\n\n{status}. Send messages here.",
-            )
-
-            # Send pending text if any
+            # The message that opened the topic names it — it is not sent to Claude
             pending_text = (
                 context.user_data.get("_pending_thread_text")
                 if context.user_data
                 else None
             )
-            if pending_text:
-                logger.debug(
-                    "Forwarding pending text to window %s (len=%d)",
-                    created_wname,
-                    len(pending_text),
-                )
-                if context.user_data is not None:
-                    context.user_data.pop("_pending_thread_text", None)
-                    context.user_data.pop("_pending_thread_id", None)
-                send_ok, send_msg = await session_manager.send_to_window(
-                    created_wid,
-                    pending_text,
-                )
-                if not send_ok:
-                    logger.warning("Failed to forward pending text: %s", send_msg)
-                    resolved_chat = session_manager.resolve_chat_id(
-                        user.id, pending_thread_id
-                    )
-                    await safe_send(
-                        context.bot,
-                        resolved_chat,
-                        f"❌ Failed to send pending message: {send_msg}",
-                        message_thread_id=pending_thread_id,
-                    )
-            elif context.user_data is not None:
+            if context.user_data is not None:
+                context.user_data.pop("_pending_thread_text", None)
                 context.user_data.pop("_pending_thread_id", None)
+
+            title = _topic_title_from_text(pending_text or "")
+            renamed = await _rename_topic(
+                context.bot, user.id, pending_thread_id, title
+            )
+
+            status = "Resumed" if resume_session_id else "Created"
+            lines = [f"✅ {message}", "", f"{status}. Send messages here."]
+            if title and not renamed:
+                lines.append(f"⚠️ Could not rename the topic to '{title}'.")
+            if trust_error:
+                lines.append(f"⚠️ Could not pre-approve directory trust: {trust_error}")
+            await safe_edit(query, "\n".join(lines))
         else:
             # Should not happen in topic-only mode, but handle gracefully
             await safe_edit(query, f"✅ {message}")
@@ -1488,31 +1594,21 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             user.id, thread_id, selected_wid, window_name=display
         )
 
-        await safe_edit(
-            query,
-            f"✅ Bound to window `{display}`",
-        )
-
-        # Forward pending text if any
+        # The message that opened the topic names it — it is not sent to Claude
         pending_text = (
             context.user_data.get("_pending_thread_text") if context.user_data else None
         )
         if context.user_data is not None:
             context.user_data.pop("_pending_thread_text", None)
             context.user_data.pop("_pending_thread_id", None)
-        if pending_text:
-            send_ok, send_msg = await session_manager.send_to_window(
-                selected_wid, pending_text
-            )
-            if not send_ok:
-                logger.warning("Failed to forward pending text: %s", send_msg)
-                resolved_chat = session_manager.resolve_chat_id(user.id, thread_id)
-                await safe_send(
-                    context.bot,
-                    resolved_chat,
-                    f"❌ Failed to send pending message: {send_msg}",
-                    message_thread_id=thread_id,
-                )
+
+        title = _topic_title_from_text(pending_text or "")
+        renamed = await _rename_topic(context.bot, user.id, thread_id, title)
+
+        lines = [f"✅ Bound to window `{display}`", "", "Send messages here."]
+        if title and not renamed:
+            lines.append(f"⚠️ Could not rename the topic to '{title}'.")
+        await safe_edit(query, "\n".join(lines))
         await query.answer("Bound")
 
     # Window picker: new session → transition to directory browser
@@ -1838,7 +1934,7 @@ async def post_init(application: Application) -> None:
         BotCommand("history", "Message history for this topic"),
         BotCommand("screenshot", "Terminal screenshot with control keys"),
         BotCommand("esc", "Send Escape to interrupt Claude"),
-        BotCommand("kill", "Kill session and delete topic"),
+        BotCommand("kill", "Kill this topic's session (tmux window)"),
         BotCommand("unbind", "Unbind topic from session (keeps window running)"),
         BotCommand("usage", "Show Claude Code usage remaining"),
     ]
@@ -1914,6 +2010,7 @@ def create_bot() -> Application:
     application.add_handler(CommandHandler("history", history_command))
     application.add_handler(CommandHandler("screenshot", screenshot_command))
     application.add_handler(CommandHandler("esc", esc_command))
+    application.add_handler(CommandHandler("kill", kill_command))
     application.add_handler(CommandHandler("unbind", unbind_command))
     application.add_handler(CommandHandler("usage", usage_command))
     application.add_handler(CallbackQueryHandler(callback_handler))

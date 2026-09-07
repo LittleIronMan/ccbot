@@ -10,7 +10,8 @@ Tech stack: Python, python-telegram-bot, tmux, uv.
 uv run ruff check src/ tests/         # Lint — MUST pass before committing
 uv run ruff format src/ tests/        # Format — auto-fix, then verify with --check
 uv run pyright src/ccbot/             # Type check — MUST be 0 errors before committing
-./scripts/restart.sh                  # Restart the ccbot service after code changes
+./scripts/restart.sh                  # Reinstall from this checkout + restart the ccbot-daemon tmux session
+./scripts/restart.sh --no-install     # Restart only, keep the installed build
 ccbot hook --install                  # Auto-install Claude Code SessionStart hook
 ```
 
@@ -21,6 +22,8 @@ ccbot hook --install                  # Auto-install Claude Code SessionStart ho
 - **No message truncation** at parse layer — splitting only at send layer (`split_message`, 4096 char limit).
 - **MarkdownV2 only** — use `safe_reply`/`safe_edit`/`safe_send` helpers (auto fallback to plain text). Internal queue/UI code calls bot API directly with its own fallback.
 - **Hook-based session tracking** — `SessionStart` hook writes `session_map.json`; monitor polls it to detect session changes.
+- **First message names the topic** — the message that opens an unbound topic becomes the topic title, not a prompt for Claude.
+- **Directory trust is pre-approved** — before starting `claude`, the selected directory is added to `projects.<path>.hasTrustDialogAccepted` in Claude Code's `.claude.json` (`claude_config.py`, disable with `CCBOT_AUTO_TRUST_DIRS=false`).
 - **Message queue per user** — FIFO ordering, message merging (3800 char limit), tool_use/tool_result pairing.
 - **Rate limiting** — `AIORateLimiter(max_retries=5)` on the Application (30/s global). On restart, the global bucket is pre-filled to avoid burst against Telegram's server-side counter.
 

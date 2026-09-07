@@ -7,6 +7,7 @@
 │  - /history: Paginated message history (default: latest page)      │
 │  - /screenshot: Capture tmux pane as PNG                           │
 │  - /esc: Send Escape to interrupt Claude                           │
+│  - /kill: Kill this topic's tmux window and unbind the topic       │
 │  - Send text → Claude Code via tmux keystrokes                     │
 │  - Forward /commands to Claude Code                                │
 │  - Create sessions via directory browser in unbound topics         │
@@ -68,6 +69,7 @@
 └────────────────────────┘
 
 Additional modules:
+  claude_config.py    ─ Claude Code ~/.claude.json access (directory trust)
   screenshot.py       ─ Terminal text → PNG rendering (ANSI color, font fallback)
   transcribe.py       ─ Voice-to-text transcription via OpenAI API (gpt-4o-transcribe)
   main.py             ─ CLI entry point

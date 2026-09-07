@@ -151,6 +151,9 @@ uv run ccbot
 | `/history`    | Message history for this topic  |
 | `/screenshot` | Capture terminal screenshot     |
 | `/esc`        | Send Escape to interrupt Claude |
+| `/kill`       | Kill this topic's session (tmux window) and unbind it |
+| `/unbind`     | Unbind the topic, leaving the window running |
+| `/usage`      | Show Claude Code usage remaining |
 
 **Claude Code commands (forwarded via tmux):**
 
@@ -174,7 +177,8 @@ Any unrecognized `/command` is also forwarded to Claude Code as-is (e.g. `/revie
 2. Send any message in the topic
 3. A directory browser appears — select the project directory
 4. If the directory has existing Claude sessions, a session picker appears — choose one to resume or start fresh
-5. A tmux window is created, `claude` starts (with `--resume` if resuming), and your pending message is forwarded
+5. The directory is marked as trusted in Claude Code's config (`projects.<path>.hasTrustDialogAccepted`) so the "Do you trust the files in this folder?" dialog never blocks startup — set `CCBOT_AUTO_TRUST_DIRS=false` to disable
+6. A tmux window is created, `claude` starts (with `--resume` if resuming), and the topic is renamed to the message from step 2 — that message is *not* sent to Claude, so the session starts empty and your next message is the first prompt
 
 **Sending messages:**
 
@@ -182,7 +186,9 @@ Once a topic is bound to a session, just send text or voice messages in that top
 
 **Killing a session:**
 
-Close (or delete) the topic in Telegram. The associated tmux window is automatically killed and the binding is removed.
+Send `/kill` in the topic: the associated tmux window is killed and the binding removed (the topic itself stays — delete it in Telegram if you want it gone).
+
+Closing a topic does the same automatically, but only in chats where topics can be closed; deleting a topic sends no update to the bot, so use `/kill` first there.
 
 ### Message History
 
