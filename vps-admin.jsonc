@@ -1,0 +1,16 @@
+{
+  "$schema": "file:///home/jarvis/vps-admin/vps-admin.schema.json",
+  "version": 1,
+  "id": "ccbot",
+  "instances": [
+    {
+      "id": "daemon",
+      "comment": "Telegram-бот для сессий Claude Code.",
+      "runtime": {
+        "kind": "tmux",
+        "session": "ccbot-daemon",
+        "command": "ccbot"
+      }
+    }
+  ]
+}
